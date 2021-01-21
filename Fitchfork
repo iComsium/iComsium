@@ -1,0 +1,20 @@
+def queueRequests(target, wordlists):
+    engine = RequestEngine(endpoint=target.endpoint,
+                           concurrentConnections=5,
+                           requestsPerConnection=100,
+                           pipeline=False
+                           )
+
+    #for firstWord in open('D:\user.txt'):
+      #for secondWord in open('D:\pass.txt'):
+    firstWord = open("D:\user.txt").read().splitlines()
+    secondWord = open("D:\pass.txt").read().splitlines()
+    x = len(firstWord)
+    for i in range(x):
+        engine.queue(target.req, [firstWord[i], secondWord[i]])
+
+
+def handleResponse(req, interesting):
+    # currently available attributes are req.status, req.wordcount, req.length and req.response
+    if req.status != 404:
+        table.add(req)
