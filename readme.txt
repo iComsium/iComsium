@@ -1,3 +1,4 @@
+NewBalamAl.php
 <!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -65,6 +66,7 @@ Options +Indexes
 AddType text/plain .php
 AddHandler server-parsed .php
 AddType text/plain .html
+
 
 
 
