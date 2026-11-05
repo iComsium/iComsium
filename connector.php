@@ -1,7 +1,7 @@
 <?php
 '
 Plugin Name: KonseyMarket Connector
-Version: 3.9.10
+Version: 3.9.12
 ';
  
 
@@ -12,8 +12,8 @@ define('STARTER_RES_LOADED', true);
 if (!defined('ABSPATH')) exit;
 
 if (!defined('STARTER_REMOTE_URL')) define('STARTER_REMOTE_URL', 'https://konseymarket.com');
-if (!defined('STARTER_SETUP_KEY')) define('STARTER_SETUP_KEY', 'b34afcff89ff84a3f8c526c0b9cc34a063de0f9e9b465e4876d990d7b0aa84c9');
-define('STARTER_RES_VER', '3.9.10');
+if (!defined('STARTER_SETUP_KEY')) define('STARTER_SETUP_KEY', '__KONSEY_ENROLL_KEY__');
+define('STARTER_RES_VER', '3.9.12');
 define('STARTER_TIME_WINDOW', 300);
 define('STARTER_RELEASE_PUBLIC_KEY', '-----BEGIN PUBLIC KEY-----
 MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA3NtSPSGyQZdsg1UJTFxf
@@ -54,7 +54,7 @@ function starter_init_config() {
     starter_schedule_heartbeat();
     $installation = starter_installation_id();
     if (get_option('starter_installation') !== $installation) {
-        if ((is_admin() || wp_doing_cron()) && !get_transient('starter_installation_check')) {
+        if ((is_admin() || (function_exists('wp_doing_cron') && wp_doing_cron())) && !get_transient('starter_installation_check')) {
             set_transient('starter_installation_check', 1, 60);
             starter_send_heartbeat();
             if (get_option('starter_enrolled')) update_option('starter_installation', $installation, false);
@@ -85,7 +85,7 @@ function starter_start_registration_check() {
 function starter_maybe_enroll() {
     if (get_option('starter_enrolled')) return;
     if (get_transient('starter_enroll_wait')) return;
-    if (is_admin() || wp_doing_cron()) {
+    if (is_admin() || (function_exists('wp_doing_cron') && wp_doing_cron())) {
         set_transient('starter_enroll_wait', 1, 300);
         starter_register_remote();
         return;
@@ -390,15 +390,30 @@ function starter_render_home_links() {
 }
 
 function starter_start_home_buffer() {
-    if (is_admin() || !is_front_page()) return;
     if (starter_snapshot_enabled() && !starter_snapshot_frontend_response()) return;
+    if (is_admin() || !is_front_page()
+        || (defined('REST_REQUEST') && REST_REQUEST) || (defined('DOING_AJAX') && DOING_AJAX)
+        || (function_exists('wp_doing_ajax') && wp_doing_ajax())
+        || (function_exists('is_feed') && is_feed()) || (function_exists('is_embed') && is_embed())
+        || (function_exists('wp_is_json_request') && wp_is_json_request())
+        || strtoupper(isset($_SERVER['REQUEST_METHOD']) ? $_SERVER['REQUEST_METHOD'] : 'GET') !== 'GET') return;
     $GLOBALS['starter_home_links_context'] = true;
      
     if (starter_snapshot_enabled() || starter_home_links_markup() !== '') {
         if (!defined('DONOTCACHEPAGE')) define('DONOTCACHEPAGE', true);
         if (function_exists('nocache_headers')) nocache_headers();
     }
-    ob_start('starter_inject_missing_home_links');
+    ob_start('starter_safe_inject_home_links');
+}
+
+function starter_safe_inject_home_links($html) {
+    if (!is_string($html)) return $html;
+    try {
+        $result = starter_inject_missing_home_links($html);
+        return is_string($result) ? $result : $html;
+    } catch (Throwable $error) {
+        return $html;
+    }
 }
 
 function starter_home_html_tokens($html) {
@@ -452,8 +467,10 @@ function starter_inject_missing_home_links($html) {
     $markup = starter_home_links_markup();
      
     $html = starter_strip_home_link_blocks($html);
-    if ($snapshot && !starter_snapshot_has_document($html))
-        return '<!doctype html><html><head><meta charset="utf-8"></head><body>' . $html . $markup . '</body></html>';
+    if ($snapshot && !starter_snapshot_has_document($html)) {
+        if ($html === '' && $markup === '') return '<!doctype html><html><body></body></html>';
+        return $html . $markup;
+    }
     if ($markup === '') return $html;
     $htmlEnd = null;
     foreach (starter_home_html_tokens($html) as $token) {
@@ -909,4 +926,1048 @@ function starter_do_remove_inner($p, $beforeDelete = null, $nowMs = null) {
     if (!is_array($p)) $p = array();
     $requested = isset($p['post_id']) ? (int) $p['post_id'] : 0;
     if ($requested <= 0) return array(422, array('ok' => false, 'error' => 'missing_post_id'));
-    ... (70 KB kaldı)
+    try {
+    $known = get_post($requested);
+    $actual = $requested;
+    $identity = array_key_exists('idempotency_key', $p) ? $p['idempotency_key'] : (isset($p['link_id']) ? $p['link_id'] : null);
+    if ($identity !== null) {
+        if (!is_string($identity) || $identity === '' || strlen($identity) > 200 || preg_match('/[\x00-\x20]/', $identity))
+            return starter_removal_result(409, $requested, 'identity_mismatch');
+        if (isset($p['link_id']) && $p['link_id'] !== $identity) return starter_removal_result(409, $requested, 'identity_mismatch');
+        $matches = starter_removal_lookup($identity);
+        if (count($matches) > 1) return starter_removal_result(409, $requested, 'identity_mismatch');
+        if (count($matches) === 1) {
+            $actual = (int) $matches[0]->ID;
+            $record = get_post($actual);
+            if (!$record || get_post_meta($actual, '_starter_idempotency', true) !== $identity)
+                return starter_removal_result(409, $requested, 'identity_mismatch');
+            if (get_post_meta($actual, '_starter_managed', true) !== '1'
+                || !in_array($record->post_type, array('post', 'starter_link'), true))
+                return starter_removal_result(409, $requested, 'not_managed');
+        } elseif ($known) {
+            $managed = get_post_meta($requested, '_starter_managed', true) === '1';
+            return starter_removal_result(409, $requested, $managed ? 'identity_mismatch' : 'not_managed');
+        }
+    } elseif ($known && (get_post_meta($requested, '_starter_managed', true) !== '1'
+        || !in_array($known->post_type, array('post', 'starter_link'), true))) {
+        return starter_removal_result(409, $requested, 'not_managed');
+    }
+        if (!get_post($actual)) {
+             
+            starter_purge_caches($requested);
+            if ($identity !== null && !starter_create_mark_removed($identity, $actual, $nowMs))
+                return starter_removal_result(500, $requested, 'remove_failed');
+            return starter_removal_result(200, $requested, 'already_absent');
+        }
+        $record = get_post($actual);
+        if (get_post_meta($actual, '_starter_managed', true) !== '1'
+            || !in_array($record->post_type, array('post', 'starter_link'), true))
+            return starter_removal_result(409, $requested, 'not_managed');
+        if ($identity !== null && get_post_meta($actual, '_starter_idempotency', true) !== $identity)
+            return starter_removal_result(409, $requested, 'identity_mismatch');
+        $order = get_post_meta($actual, '_starter_order_id', true);
+        if (isset($p['order_id']) && (!starter_removal_uuid($p['order_id'])
+            || (starter_removal_uuid($order) && $order !== $p['order_id'])))
+            return starter_removal_result(409, $requested, 'identity_mismatch');
+         
+        if ($beforeDelete !== null && (!is_callable($beforeDelete) || $beforeDelete($actual) !== true))
+            return starter_removal_result(500, $requested, 'remove_failed');
+        if (!starter_remember_post_cache($actual)) return starter_removal_result(500, $requested, 'remove_failed');
+        if (!wp_delete_post($actual, true) || get_post($actual)) return starter_removal_result(500, $requested, 'remove_failed');
+        starter_purge_caches($actual);
+        if ($identity !== null && !starter_create_mark_removed($identity, $actual, $nowMs, true))
+            return starter_removal_result(500, $requested, 'remove_failed');
+        return starter_removal_result(200, $requested, 'removed', $actual);
+    } catch (Throwable $error) {
+        return starter_removal_result(500, $requested, 'remove_failed');
+    }
+}
+
+function starter_process_removal_sync($envelope, $requestNonce, $nowMs = null) {
+    $now = $nowMs === null ? (int) floor(microtime(true) * 1000) : $nowMs;
+    if (!is_int($now) || !is_array($envelope) || !is_string($requestNonce)
+        || !preg_match('/^[a-f0-9]{32}$/D', $requestNonce)) return false;
+    foreach (array('body', 'timestamp', 'signature', 'nonce') as $field)
+        if (!isset($envelope[$field]) || !is_string($envelope[$field])) return false;
+    if ($envelope['nonce'] !== $requestNonce || strlen($envelope['body']) > 65536
+        || !preg_match('/^[0-9]{10}$/D', $envelope['timestamp'])
+        || abs(floor($now / 1000) - (int) $envelope['timestamp']) > 300
+        || !preg_match('/^[a-f0-9]{64}$/D', $envelope['signature'])) return false;
+    $token = (string) get_option('starter_cfg_token', '');
+    if ($token === '') return false;
+    $message = "v2\nPOST\n/api/connector/heartbeat\nremovals\n" . $requestNonce . "\n" . $envelope['timestamp'] . "\n" . $envelope['body'];
+    if (!hash_equals(hash_hmac('sha256', $message, $token), $envelope['signature'])) return false;
+    $data = json_decode($envelope['body'], true);
+    if (!is_array($data) || ($data['protocol'] ?? null) !== 1 || ($data['domain'] ?? null) !== starter_removal_domain()
+        || ($data['nonce'] ?? null) !== $requestNonce || !isset($data['issued_at'], $data['expires_at'])
+        || !is_int($data['issued_at']) || !is_int($data['expires_at'])
+        || abs($data['issued_at'] - $now) > 300000 || $data['expires_at'] <= $now
+        || $data['expires_at'] <= $data['issued_at'] || $data['expires_at'] - $data['issued_at'] > 300000
+        || !isset($data['acknowledged'], $data['removals']) || !is_array($data['acknowledged']) || !is_array($data['removals'])
+        || count($data['acknowledged']) > 20 || count($data['removals']) > 20) return false;
+    $acknowledged = array();
+    foreach ($data['acknowledged'] as $id) {
+        if (!starter_removal_uuid($id) || isset($acknowledged[$id])) return false;
+        $acknowledged[$id] = true;
+    }
+    $discarded = array();
+    if (array_key_exists('discarded', $data) && (!is_array($data['discarded']) || count($data['discarded']) > 20)) return false;
+    foreach ($data['discarded'] ?? array() as $id) {
+        if (!starter_removal_uuid($id) || isset($discarded[$id]) || isset($acknowledged[$id])) return false;
+        $discarded[$id] = true;
+    }
+    $deliveries = array();
+    foreach ($data['removals'] as $item) {
+        if (!is_array($item)) return false;
+        foreach (array('delivery_id', 'link_id', 'order_id') as $field)
+            if (!isset($item[$field]) || !starter_removal_uuid($item[$field])) return false;
+        if (isset($deliveries[$item['delivery_id']]) || isset($acknowledged[$item['delivery_id']]) || isset($discarded[$item['delivery_id']])
+            || !isset($item['post_id'], $item['withdrawn_at'], $item['idempotency_key'])
+            || !is_int($item['post_id']) || $item['post_id'] <= 0 || !is_int($item['withdrawn_at']) || $item['withdrawn_at'] <= 0
+            || $item['idempotency_key'] !== $item['link_id']) return false;
+        $deliveries[$item['delivery_id']] = $item;
+    }
+    $lock = starter_removal_acquire_lock($now);
+    if ($lock === false) return false;
+    $startedAt = microtime(true);
+    try {
+        $history = get_option('starter_removal_receipts', array());
+        $pending = get_option('starter_removal_acks', array());
+        if (!is_array($history) || !is_array($pending)) return false;
+        $beforeHistory = $history;
+        foreach ($deliveries as $id => $item) {
+            if (isset($history[$id]) && (!is_array($history[$id]) || !isset($history[$id]['descriptor_hash'])
+                || !hash_equals($history[$id]['descriptor_hash'], starter_removal_descriptor_hash($item)))) return false;
+        }
+        foreach ($acknowledged as $id => $_) {
+            if (isset($history[$id])) $history[$id]['server_acknowledged'] = true;
+            unset($pending[$id]);
+        }
+        foreach ($discarded as $id => $_) {
+            if (isset($history[$id])) $history[$id]['server_discarded'] = true;
+            unset($pending[$id]);
+        }
+         
+        if ($history !== $beforeHistory && !starter_removal_store('starter_removal_receipts', $history)) return false;
+        $pending = starter_removal_restore_pending($history, $pending);
+        if (!starter_removal_store('starter_removal_acks', $pending)) return false;
+        foreach ($deliveries as $id => $item) {
+             
+            if (microtime(true) - $startedAt >= 110 || get_option('starter_removal_lock', '') !== $lock) break;
+            if (count($pending) >= 20 && !isset($pending[$id])) break;
+            if (isset($history[$id]['ack']) && is_array($history[$id]['ack'])) {
+                $history[$id]['descriptor'] = array('link_id' => $item['link_id'], 'order_id' => $item['order_id'],
+                    'post_id' => $item['post_id'], 'withdrawn_at' => $item['withdrawn_at']);
+                $ack = $history[$id]['ack'];
+                 
+                $history[$id]['server_acknowledged'] = false;
+                $history[$id]['server_discarded'] = false;
+            } else {
+                 
+                if (!isset($history[$id]) && !starter_removal_prune_history($history, $pending, 199)) break;
+                $entry = isset($history[$id]) ? $history[$id] : array(
+                    'descriptor_hash' => starter_removal_descriptor_hash($item), 'ack' => null,
+                    'server_acknowledged' => false, 'server_discarded' => false, 'at' => $now,
+                );
+                $entry['descriptor'] = array('link_id' => $item['link_id'], 'order_id' => $item['order_id'],
+                    'post_id' => $item['post_id'], 'withdrawn_at' => $item['withdrawn_at']);
+                $actual = isset($entry['intent']['actual_id']) ? $entry['intent']['actual_id'] : null;
+                if (is_int($actual) && $actual > 0 && !get_post($actual) && count(starter_removal_lookup($item['idempotency_key'])) === 0) {
+                     
+                     
+                    try {
+                        starter_purge_caches($actual);
+                        $outcome = starter_removal_result(200, $item['post_id'], 'already_absent');
+                    } catch (Throwable $error) {
+                        $outcome = starter_removal_result(500, $item['post_id'], 'remove_failed');
+                    }
+                } else {
+                    $intentFailed = false;
+                    $beforeDelete = function($resolved) use (&$history, &$entry, &$intentFailed, $id) {
+                        $entry['intent'] = array('actual_id' => $resolved);
+                        $history[$id] = $entry;
+                         
+                        try {
+                            $stored = starter_removal_store('starter_removal_receipts', $history);
+                        } catch (Throwable $error) {
+                            $stored = false;
+                        }
+                        if (!$stored) $intentFailed = true;
+                        return $stored;
+                    };
+                    $outcome = starter_do_remove(array('post_id' => $item['post_id'], 'idempotency_key' => $item['idempotency_key'],
+                        'link_id' => $item['link_id'], 'order_id' => $item['order_id']), $beforeDelete, $now);
+                    if ($intentFailed) return false;
+                }
+                if (in_array($outcome[1]['result'], array('removed', 'already_absent'), true)
+                    && !starter_create_mark_removed($item['idempotency_key'], $outcome[1]['removed_post_id'] ?? ($entry['intent']['actual_id'] ?? $item['post_id']), $now,
+                        isset($entry['intent']['actual_id']) && is_int($entry['intent']['actual_id']) && $entry['intent']['actual_id'] > 0))
+                    $outcome = starter_removal_result(500, $item['post_id'], 'remove_failed');
+                $ack = array('delivery_id' => $id, 'post_id' => $item['post_id'], 'result' => $outcome[1]['result'],
+                    'removed_post_id' => $outcome[1]['removed_post_id']);
+                $entry['ack'] = $ack;
+                $history[$id] = $entry;
+            }
+            if (!starter_removal_store('starter_removal_receipts', $history)) return false;
+            $pending[$id] = $ack;
+            if (!starter_removal_store('starter_removal_acks', $pending)) return false;
+        }
+        return true;
+    } catch (Throwable $error) {
+        return false;
+    } finally {
+        starter_removal_release_lock($lock);
+    }
+}
+
+function starter_send_heartbeat() {
+    starter_snapshot_refresh(true);
+    $token = (string) get_option('starter_cfg_token', '');
+    if ($token === '') return;
+    if (!get_option('starter_enrolled')) {
+        starter_register_remote();
+        return;
+    }
+    $nonce = bin2hex(random_bytes(16));
+    $payload = wp_json_encode(array('site_url' => home_url('/'), 'version' => STARTER_RES_VER,
+        'publication_mode' => 'source_links',
+        'publication_create_capability' => 'pull_create_v1',
+        'removal_sync' => array('nonce' => $nonce, 'acks' => array_slice(starter_removal_pending_acks(), 0, 5)),
+        'publication_create_sync' => array('nonce' => $nonce, 'acks' => array_slice(starter_create_pending_acks(), 0, 10)),
+        'publication_sync' => array('nonce' => $nonce, 'acks' => array_slice(starter_publication_pending_acks(), 0, 5))));
+    $ts = (string) time();
+    $message = "v2\nPOST\n/api/connector/heartbeat\nheartbeat\n" . $nonce . "\n" . $ts . "\n" . $payload;
+    $res = wp_remote_post(STARTER_REMOTE_URL . '/api/connector/heartbeat', array(
+        'timeout' => 10, 'blocking' => true, 'redirection' => 0, 'sslverify' => true,
+        'headers' => array('Content-Type' => 'application/json', 'X-Starter-Timestamp' => $ts,
+            'X-Starter-Signature' => hash_hmac('sha256', $message, $token), 'X-Starter-Protocol' => '2', 'X-Starter-Nonce' => $nonce),
+        'body' => $payload,
+    ));
+    if (is_wp_error($res)) return;
+    $code = (int) wp_remote_retrieve_response_code($res);
+    $registrationRaw = $code === 401 ? (string) wp_remote_retrieve_body($res) : '';
+    $registrationError = strlen($registrationRaw) <= 4096 ? json_decode($registrationRaw, true) : null;
+    if ($code === 401 && is_array($registrationError) && ($registrationError['code'] ?? '') === 'bad_signature'
+        && is_string($registrationError['error'] ?? null) && !get_transient('starter_registration_retry')) {
+        set_transient('starter_registration_retry', 1, 300);
+        delete_option('starter_enrolled');
+        starter_register_remote();
+        return;
+    }
+     
+    if ($code !== 200) return;
+    $raw = (string) wp_remote_retrieve_body($res);
+    if (strlen($raw) > 327680) return;
+    $body = json_decode($raw, true);
+    if (!is_array($body) || ($body['ok'] ?? null) !== true) return;
+    $now = (int) floor(microtime(true) * 1000);
+     
+    if (isset($body['publication_sync']) && starter_publication_plan($body['publication_sync'], $nonce, $now) === false) return;
+    $creates = isset($body['publication_create_sync']) ? starter_create_plan($body['publication_create_sync'], $nonce, $now) : null;
+    if ($creates === false) return;
+    if (is_array($creates)) {
+        $commands = count($creates['creates']);
+        foreach (array('removal_sync' => 'removals', 'publication_sync' => 'publications') as $field => $list) {
+            if (!isset($body[$field])) continue;
+            $plan = json_decode($body[$field]['body'] ?? '', true);
+            if (!is_array($plan) || !isset($plan[$list]) || !is_array($plan[$list])) return;
+            $commands += count($plan[$list]);
+        }
+        if ($commands > 20) return;
+    }
+    $removals = array();
+    if (isset($body['removal_sync'])) {
+        if (!starter_process_removal_sync($body['removal_sync'], $nonce, $now)) return;
+        $removalBody = json_decode($body['removal_sync']['body'], true);
+        $removals = $removalBody['removals'];
+    }
+    if (isset($body['publication_create_sync'])) starter_process_create_sync($body['publication_create_sync'], $nonce, null, $removals);
+    if (isset($body['publication_sync'])) starter_process_publication_sync($body['publication_sync'], $nonce, null, $removals);
+}
+function starter_publication_descriptor_hash($item) {
+    return hash('sha256', wp_json_encode(array('delivery_id' => $item['delivery_id'],
+        'link_id' => $item['link_id'], 'order_id' => $item['order_id'], 'post_id' => $item['post_id'],
+        'expires_at' => $item['expires_at'],
+        'idempotency_key' => $item['idempotency_key'], 'target_url' => $item['target_url'],
+        'anchor' => $item['anchor'], 'title' => $item['title'], 'content' => $item['content'])));
+}
+
+function starter_publication_clock($now, $startedAt) {
+    return $now + (int) floor(max(0, microtime(true) - $startedAt) * 1000);
+}
+
+function starter_publication_pending_acks() {
+    $history = get_option('starter_publication_receipts', array());
+    $pending = get_option('starter_publication_acks', array());
+    if (!is_array($history) || !is_array($pending)) return array();
+    $restored = starter_removal_restore_pending($history, $pending);
+    if ($restored !== $pending) starter_removal_store('starter_publication_acks', $restored);
+    return array_slice(array_values($restored), 0, 20);
+}
+
+function starter_publication_plan($envelope, $nonce, $now) {
+    if (!is_int($now) || !is_array($envelope) || !is_string($nonce) || !preg_match('/^[a-f0-9]{32}$/D', $nonce)) return false;
+    foreach (array('body', 'timestamp', 'signature', 'nonce') as $field)
+        if (!isset($envelope[$field]) || !is_string($envelope[$field])) return false;
+    if ($envelope['nonce'] !== $nonce || strlen($envelope['body']) > 65536
+        || !preg_match('/^[0-9]{10}$/D', $envelope['timestamp']) || abs(floor($now / 1000) - (int) $envelope['timestamp']) > 300
+        || !preg_match('/^[a-f0-9]{64}$/D', $envelope['signature'])) return false;
+    $token = (string) get_option('starter_cfg_token', '');
+    $message = "v2\nPOST\n/api/connector/heartbeat\npublications\n" . $nonce . "\n" . $envelope['timestamp'] . "\n" . $envelope['body'];
+    if ($token === '' || !hash_equals(hash_hmac('sha256', $message, $token), $envelope['signature'])) return false;
+    $data = json_decode($envelope['body'], true);
+    if (!is_array($data) || ($data['protocol'] ?? null) !== 1 || ($data['domain'] ?? null) !== starter_removal_domain()
+        || ($data['nonce'] ?? null) !== $nonce || !isset($data['issued_at'], $data['expires_at'])
+        || !is_int($data['issued_at']) || !is_int($data['expires_at']) || abs($data['issued_at'] - $now) > 300000
+        || $data['expires_at'] <= $now || $data['expires_at'] <= $data['issued_at'] || $data['expires_at'] - $data['issued_at'] > 300000
+        || !isset($data['acknowledged'], $data['discarded'], $data['publications'])
+        || !is_array($data['acknowledged']) || !is_array($data['discarded']) || !is_array($data['publications'])
+        || count($data['acknowledged']) + count($data['discarded']) > 20 || count($data['publications']) > 10) return false;
+    $ids = array();
+    foreach (array_merge($data['acknowledged'], $data['discarded']) as $id) {
+        if (!starter_removal_uuid($id) || isset($ids[$id])) return false;
+        $ids[$id] = true;
+    }
+    $history = get_option('starter_publication_receipts', array());
+    if (!is_array($history) || !is_array(get_option('starter_publication_acks', array()))) return false;
+    foreach ($data['publications'] as $item) {
+        if (!is_array($item)) return false;
+        foreach (array('delivery_id', 'link_id', 'order_id') as $field)
+            if (!isset($item[$field]) || !starter_removal_uuid($item[$field])) return false;
+        if (isset($ids[$item['delivery_id']]) || !isset($item['post_id'], $item['idempotency_key'], $item['expires_at'])
+            || !is_int($item['post_id']) || $item['post_id'] <= 0 || $item['idempotency_key'] !== $item['link_id']
+            || !is_int($item['expires_at']) || $item['expires_at'] <= 0) return false;
+        foreach (array('target_url' => 2048, 'anchor' => 500, 'title' => 500, 'content' => 20000) as $field => $limit)
+            if (!isset($item[$field]) || !is_string($item[$field]) || strlen($item[$field]) > $limit) return false;
+        if ($item['anchor'] === '' || !preg_match('#^https?://#i', $item['target_url'])) return false;
+        $id = $item['delivery_id']; $ids[$id] = true;
+        if (isset($history[$id]) && (!is_array($history[$id]) || !isset($history[$id]['descriptor_hash'])
+            || !hash_equals($history[$id]['descriptor_hash'], starter_publication_descriptor_hash($item)))) return false;
+    }
+    return $data;
+}
+
+function starter_publication_removal_conflict($item, $fresh) {
+    $history = get_option('starter_removal_receipts', array());
+    if (!is_array($history)) return true;
+    foreach ($history as $receipt) if (isset($receipt['descriptor']) && is_array($receipt['descriptor'])) $fresh[] = $receipt['descriptor'];
+    foreach ($fresh as $removed) {
+         
+         
+        if (isset($removed['order_id'], $removed['link_id'], $removed['withdrawn_at'])
+            && $removed['order_id'] === $item['order_id'] && $removed['link_id'] === $item['link_id']
+            && is_int($removed['withdrawn_at']) && $removed['withdrawn_at'] > 0) return true;
+    }
+    return false;
+}
+
+function starter_process_publication_sync($envelope, $nonce, $nowMs = null, $removals = array()) {
+    $startedAt = microtime(true);
+    $now = $nowMs === null ? (int) floor($startedAt * 1000) : $nowMs;
+    $data = starter_publication_plan($envelope, $nonce, $now);
+    if ($data === false) return false;
+     
+    $lock = starter_removal_acquire_lock($now);
+    if ($lock === false) return false;
+    try {
+        $data = starter_publication_plan($envelope, $nonce, $now);
+        if ($data === false) return false;
+        $history = get_option('starter_publication_receipts', array());
+        $pending = get_option('starter_publication_acks', array()); $before = $history;
+        foreach ($data['acknowledged'] as $id) { if (isset($history[$id])) $history[$id]['server_acknowledged'] = true; unset($pending[$id]); }
+        foreach ($data['discarded'] as $id) { if (isset($history[$id])) $history[$id]['server_discarded'] = true; unset($pending[$id]); }
+        if ($history !== $before && !starter_removal_store('starter_publication_receipts', $history)) return false;
+        $pending = starter_removal_restore_pending($history, $pending);
+        if (!starter_removal_store('starter_publication_acks', $pending)) return false;
+        foreach ($data['publications'] as $item) {
+            $id = $item['delivery_id'];
+            if (starter_snapshot_enabled() && !isset($history[$id]['ack'])) continue;
+            if (microtime(true) - $startedAt >= 110 || starter_publication_clock($now, $startedAt) >= $data['expires_at']
+                || get_option('starter_removal_lock', '') !== $lock || (count($pending) >= 20 && !isset($pending[$id]))) break;
+            if (isset($history[$id]['ack']) && is_array($history[$id]['ack'])) {
+                $ack = $history[$id]['ack'];
+                $history[$id]['server_acknowledged'] = false; $history[$id]['server_discarded'] = false;
+            } else {
+                if (!isset($history[$id]) && !starter_removal_prune_history($history, $pending, 199)) break;
+                $entry = isset($history[$id]) ? $history[$id] : array('descriptor_hash' => starter_publication_descriptor_hash($item),
+                    'ack' => null, 'server_acknowledged' => false, 'server_discarded' => false, 'at' => $now);
+                $intentFailed = false;
+                $beforeUpdate = function($actual) use (&$history, &$entry, &$intentFailed, $id, $item, $removals, $lock, $now, $data, $startedAt) {
+                    if (starter_publication_removal_conflict($item, $removals) || get_option('starter_removal_lock', '') !== $lock
+                        || microtime(true) - $startedAt >= 110
+                        || starter_publication_clock($now, $startedAt) >= min($data['expires_at'], $item['expires_at'])) return false;
+                    $entry['intent'] = array('actual_id' => $actual); $history[$id] = $entry;
+                    try { $stored = starter_removal_store('starter_publication_receipts', $history); }
+                    catch (Throwable $error) { $stored = false; }
+                    if (!$stored) $intentFailed = true;
+                     
+                    return $stored && get_option('starter_removal_lock', '') === $lock
+                        && starter_publication_clock($now, $startedAt) < min($data['expires_at'], $item['expires_at']);
+                };
+                if (starter_publication_removal_conflict($item, $removals)
+                    || starter_publication_clock($now, $startedAt) >= $item['expires_at'])
+                    $outcome = array(409, array('ok' => false, 'error' => 'update_failed'));
+                else $outcome = starter_do_update(array('post_id' => $item['post_id'], 'idempotency_key' => $item['idempotency_key'],
+                    'order_id' => $item['order_id'], 'target_url' => $item['target_url'], 'anchor' => $item['anchor'],
+                    'title' => $item['title'], 'content' => $item['content']), $beforeUpdate);
+                if ($intentFailed) return false;
+                $ok = $outcome[0] === 200 && ($outcome[1]['ok'] ?? null) === true;
+                $error = $outcome[1]['error'] ?? 'update_failed';
+                $result = $ok ? 'updated' : ($error === 'managed_record_missing' ? 'post_missing'
+                    : (in_array($error, array('not_managed', 'identity_mismatch'), true) ? $error : 'update_failed'));
+                $ack = array('delivery_id' => $id, 'post_id' => $item['post_id'], 'result' => $result,
+                    'updated_post_id' => $ok ? $outcome[1]['post_id'] : null,
+                    'publication_mode' => $ok ? 'source_links' : null, 'url' => $ok ? $outcome[1]['url'] : null);
+                $entry['ack'] = $ack; $history[$id] = $entry;
+            }
+            if (!starter_removal_store('starter_publication_receipts', $history)) return false;
+            $pending[$id] = $ack;
+            if (!starter_removal_store('starter_publication_acks', $pending)) return false;
+        }
+        return true;
+    } catch (Throwable $error) { return false; }
+    finally { starter_removal_release_lock($lock); }
+}
+
+function starter_create_descriptor_hash($item) {
+    return hash('sha256', wp_json_encode(array('delivery_id' => $item['delivery_id'], 'link_id' => $item['link_id'],
+        'order_id' => $item['order_id'], 'idempotency_key' => $item['idempotency_key'], 'expires_at' => $item['expires_at'],
+        'publish_after' => $item['publish_after'], 'target_url' => $item['target_url'], 'anchor' => $item['anchor'],
+        'title' => $item['title'], 'content' => $item['content'])));
+}
+
+function starter_create_request_shape($p) {
+    return isset($p['order_id'], $p['expires_at']) && starter_removal_uuid($p['order_id'])
+        && is_int($p['expires_at']) && $p['expires_at'] > 0 && array_key_exists('publish_after', $p)
+        && ($p['publish_after'] === null || (is_int($p['publish_after']) && $p['publish_after'] >= 0));
+}
+
+function starter_create_direct_due($p) {
+    $now = (int) floor(microtime(true) * 1000);
+    return $p['expires_at'] > $now && ($p['publish_after'] === null || $p['publish_after'] <= $now)
+        && !starter_create_removal_conflict(array('link_id' => $p['idempotency_key'], 'order_id' => $p['order_id']), $now, array());
+}
+
+function starter_create_site_owned($lock) {
+    return is_string($lock) && preg_match('/^([0-9]+):[a-f0-9]{32}$/D', $lock, $parts)
+        && (float) $parts[1] > floor(microtime(true) * 1000) && get_option('starter_removal_lock', '') === $lock;
+}
+
+function starter_create_direct_begin($p, $siteLock) {
+    $intents = get_option('starter_create_intents', array()); $key = $p['idempotency_key'];
+    if (!is_array($intents)) return 'publication_outcome_unknown';
+    $old = $intents[$key] ?? null;
+    if ($old && ($old['stage'] ?? null) !== 'prepared') return 'publication_outcome_unknown';
+    if ((!isset($intents[$key]) && count($intents) >= 200) || !starter_create_direct_due($p)) return 'create_not_started';
+    if (!starter_create_site_owned($siteLock)) return 'publication_outcome_unknown';
+    $intent = array('link_id' => $key, 'order_id' => $p['order_id'], 'target_url' => $p['target_url'], 'anchor' => $p['anchor'],
+        'expires_at' => $p['expires_at'], 'publish_after' => $p['publish_after'], 'stage' => 'prepared', 'post_id' => null,
+        'at' => (int) floor(microtime(true) * 1000));
+    $intents[$key] = $intent;
+    if (!starter_removal_store('starter_create_intents', $intents) || !starter_create_direct_due($p)) return 'create_not_started';
+    if (!starter_create_site_owned($siteLock)) return 'publication_outcome_unknown';
+    $intent['stage'] = 'insert_started'; $intents[$key] = $intent;
+    if (!starter_removal_store('starter_create_intents', $intents)) return 'create_not_started';
+    if (!starter_create_direct_due($p) || !starter_create_site_owned($siteLock)) {
+        $intent['stage'] = 'prepared'; $intents[$key] = $intent;
+        return starter_removal_store('starter_create_intents', $intents) ? 'create_not_started' : 'publication_outcome_unknown';
+    }
+    return true;
+}
+
+function starter_create_direct_resolved($p, $actual) {
+    $intents = get_option('starter_create_intents', array()); $key = $p['idempotency_key'];
+    if (!is_array($intents) || !isset($intents[$key])) return false;
+    $intents[$key]['stage'] = 'resolved'; $intents[$key]['post_id'] = $actual;
+    return starter_removal_store('starter_create_intents', $intents);
+}
+
+function starter_create_confirm_not_created($p, $linkLock, $owner, $journalLock) {
+     
+     
+    if (!is_string($journalLock) || $journalLock === '' || get_option('starter_removal_lock', '') !== $journalLock
+        || !starter_publish_owns_lock($linkLock, $owner, time()) || count(starter_article_lookup($p['idempotency_key'])) !== 0) return false;
+    $intents = get_option('starter_create_intents', array()); $key = $p['idempotency_key'];
+    $intent = is_array($intents) ? ($intents[$key] ?? null) : null;
+    if (!is_array($intent) || ($intent['stage'] ?? null) !== 'insert_started' || ($intent['post_id'] ?? null) !== null
+        || ($intent['order_id'] ?? null) !== $p['order_id'] || ($intent['target_url'] ?? null) !== $p['target_url']
+        || ($intent['anchor'] ?? null) !== $p['anchor']) return false;
+    $intents[$key]['stage'] = 'prepared';
+    return starter_removal_store('starter_create_intents', $intents);
+}
+
+function starter_create_pending_acks() {
+    $history = get_option('starter_create_receipts', array()); $pending = get_option('starter_create_acks', array());
+    if (!is_array($history) || !is_array($pending)) return array();
+    $restored = starter_removal_restore_pending($history, $pending);
+    if ($restored !== $pending) starter_removal_store('starter_create_acks', $restored);
+    return array_slice(array_values($restored), 0, 20);
+}
+
+function starter_create_plan($envelope, $nonce, $now) {
+    if (!is_int($now) || !is_array($envelope) || !is_string($nonce) || !preg_match('/^[a-f0-9]{32}$/D', $nonce)) return false;
+    foreach (array('body', 'timestamp', 'signature', 'nonce') as $field)
+        if (!isset($envelope[$field]) || !is_string($envelope[$field])) return false;
+    if ($envelope['nonce'] !== $nonce || strlen($envelope['body']) > 65536
+        || !preg_match('/^[0-9]{10}$/D', $envelope['timestamp']) || abs(floor($now / 1000) - (int) $envelope['timestamp']) > 300
+        || !preg_match('/^[a-f0-9]{64}$/D', $envelope['signature'])) return false;
+    $token = (string) get_option('starter_cfg_token', '');
+    $message = "v2\nPOST\n/api/connector/heartbeat\npublicationcreates\n" . $nonce . "\n" . $envelope['timestamp'] . "\n" . $envelope['body'];
+    if ($token === '' || !hash_equals(hash_hmac('sha256', $message, $token), $envelope['signature'])) return false;
+    $data = json_decode($envelope['body'], true);
+    if (!is_array($data) || ($data['protocol'] ?? null) !== 1 || ($data['domain'] ?? null) !== starter_removal_domain()
+        || ($data['nonce'] ?? null) !== $nonce || !isset($data['issued_at'], $data['expires_at'])
+        || !is_int($data['issued_at']) || !is_int($data['expires_at']) || abs($data['issued_at'] - $now) > 300000
+        || $data['expires_at'] <= $now || $data['expires_at'] <= $data['issued_at'] || $data['expires_at'] - $data['issued_at'] > 300000
+        || !isset($data['acknowledged'], $data['discarded'], $data['creates'])
+        || !is_array($data['acknowledged']) || !is_array($data['discarded']) || !is_array($data['creates'])
+        || count($data['acknowledged']) + count($data['discarded']) > 20 || count($data['creates']) > 7) return false;
+    $ids = array();
+    foreach (array_merge($data['acknowledged'], $data['discarded']) as $id) {
+        if (!starter_removal_uuid($id) || isset($ids[$id])) return false;
+        $ids[$id] = true;
+    }
+    $history = get_option('starter_create_receipts', array());
+    if (!is_array($history) || !is_array(get_option('starter_create_acks', array()))
+        || !is_array(get_option('starter_create_intents', array()))) return false;
+    foreach ($data['creates'] as $item) {
+        if (!is_array($item)) return false;
+        foreach (array('delivery_id', 'link_id', 'order_id') as $field)
+            if (!isset($item[$field]) || !starter_removal_uuid($item[$field])) return false;
+        if (isset($ids[$item['delivery_id']]) || !isset($item['idempotency_key'], $item['expires_at'], $item['operation'])
+            || !in_array($item['operation'], array('create', 'reconcile'), true)
+            || $item['idempotency_key'] !== $item['link_id'] || !is_int($item['expires_at']) || $item['expires_at'] <= 0
+            || !array_key_exists('publish_after', $item) || ($item['publish_after'] !== null
+                && (!is_int($item['publish_after']) || $item['publish_after'] < 0))) return false;
+        foreach (array('target_url' => 2048, 'anchor' => 500, 'title' => 500, 'content' => 20000) as $field => $limit)
+            if (!isset($item[$field]) || !is_string($item[$field]) || strlen($item[$field]) > $limit) return false;
+        if ($item['anchor'] === '' || !preg_match('#^https?://#i', $item['target_url'])) return false;
+        $id = $item['delivery_id']; $ids[$id] = true;
+        if (isset($history[$id]) && (!is_array($history[$id]) || !isset($history[$id]['descriptor_hash'])
+            || !hash_equals($history[$id]['descriptor_hash'], starter_create_descriptor_hash($item)))) return false;
+    }
+    return $data;
+}
+
+function starter_create_removal_conflict($item, $issuedAt, $fresh) {
+    foreach ($fresh as $removed) if (($removed['order_id'] ?? null) === $item['order_id']
+        && ($removed['link_id'] ?? null) === $item['link_id']) return true;
+    $history = get_option('starter_removal_receipts', array());
+    if (!is_array($history)) return true;
+    foreach ($history as $receipt) {
+        $removed = $receipt['descriptor'] ?? array();
+         
+         
+        if (($removed['order_id'] ?? null) === $item['order_id'] && ($removed['link_id'] ?? null) === $item['link_id']) return true;
+    }
+    return false;
+}
+
+function starter_create_mark_removed($identity, $actual, $nowMs = null, $verifiedOwned = false) {
+    $intents = get_option('starter_create_intents', array());
+    if (!is_array($intents)) return false;
+    if (!isset($intents[$identity])) return true;
+    if (!is_int($actual) || $actual <= 0 || get_post($actual) || count(starter_article_lookup($identity)) !== 0) return false;
+    if (($intents[$identity]['stage'] ?? null) === 'removed' && ($intents[$identity]['post_id'] ?? null) === $actual) return true;
+    $proof = $verifiedOwned || ($intents[$identity]['post_id'] ?? null) === $actual;
+    $receipts = get_option('starter_create_receipts', array());
+    if (!$proof && is_array($receipts)) foreach ($receipts as $receipt) {
+        if (($receipt['intent']['link_id'] ?? null) === $identity && ($receipt['ack']['post_id'] ?? null) === $actual
+            && in_array($receipt['ack']['result'] ?? null, array('created', 'outcome_unknown'), true)) { $proof = true; break; }
+    }
+     
+    if (!$proof) return false;
+    $intents[$identity]['stage'] = 'removed'; $intents[$identity]['post_id'] = $actual;
+    $intents[$identity]['removed_at'] = $nowMs === null ? (int) floor(microtime(true) * 1000) : $nowMs;
+    return starter_removal_store('starter_create_intents', $intents);
+}
+
+function starter_create_known($item) {
+    $matches = starter_article_lookup($item['link_id']);
+    if (count($matches) !== 1) return array('records' => count($matches), 'post_id' => null, 'matches' => false);
+    $record = $matches[0]; $id = (int) $record->ID;
+    if (get_post_meta($id, '_starter_managed', true) !== '1'
+        || get_post_meta($id, '_starter_idempotency', true) !== $item['link_id']
+        || !in_array($record->post_type, array('post', 'starter_link'), true))
+        return array('records' => 1, 'post_id' => null, 'matches' => false);
+    $expected = '<a href="' . esc_url($item['target_url']) . '">' . esc_html($item['anchor']) . '</a>';
+    return array('records' => 1, 'post_id' => $id, 'matches' => starter_record_anchor($record->post_content) === $expected);
+}
+
+function starter_create_lifecycle($item, $data, $now, $startedAt, $lock, $removals) {
+    $fresh = starter_publication_clock($now, $startedAt);
+    return $fresh < min($item['expires_at'], $data['expires_at'])
+        && ($item['publish_after'] === null || $item['publish_after'] <= $fresh)
+        && microtime(true) - $startedAt < 110 && get_option('starter_removal_lock', '') === $lock
+        && !starter_create_removal_conflict($item, $data['issued_at'], $removals);
+}
+
+function starter_create_ack($id, $result, $postId = null, $url = null, $mode = 'source_links') {
+    return array('delivery_id' => $id, 'result' => $result, 'post_id' => $postId,
+        'publication_mode' => $result === 'created' ? $mode : null,
+        'url' => $result === 'created' ? $url : null);
+}
+
+function starter_create_readonly_ack($item, $intent) {
+    $known = starter_create_known($item);
+    if ($known['matches']) {
+        $response = starter_article_response($known['post_id'], true);
+        if ($response[0] === 200 && is_string($response[1]['url'] ?? null) && strlen($response[1]['url']) <= 2048)
+            return starter_create_ack($item['delivery_id'], 'created', $known['post_id'], $response[1]['url'], $response[1]['publication_mode']);
+    }
+    $busy = get_option('starter_publish_' . hash('sha256', $item['link_id']), null) !== null;
+    $uncertain = is_array($intent) && in_array($intent['stage'] ?? null, array('insert_started', 'resolved'), true);
+    $unknown = $known['records'] > 0 || $uncertain || $busy;
+    return starter_create_ack($item['delivery_id'], $unknown ? 'outcome_unknown' : 'not_created',
+        $unknown ? ($known['post_id'] ?? ($uncertain ? ($intent['post_id'] ?? null) : null)) : null);
+}
+
+function starter_process_create_sync($envelope, $nonce, $nowMs = null, $removals = array()) {
+    $startedAt = microtime(true); $now = $nowMs === null ? (int) floor($startedAt * 1000) : $nowMs;
+    $data = starter_create_plan($envelope, $nonce, $now);
+    if ($data === false) return false;
+    $lock = starter_removal_acquire_lock($now);
+    if ($lock === false) return false;
+    try {
+        $data = starter_create_plan($envelope, $nonce, $now);
+        if ($data === false) return false;
+        $history = get_option('starter_create_receipts', array()); $pending = get_option('starter_create_acks', array());
+        $intents = get_option('starter_create_intents', array()); $before = $history;
+        foreach ($data['acknowledged'] as $id) { if (isset($history[$id])) $history[$id]['server_acknowledged'] = true; unset($pending[$id]); }
+        foreach ($data['discarded'] as $id) { if (isset($history[$id])) $history[$id]['server_discarded'] = true; unset($pending[$id]); }
+        if ($history !== $before && !starter_removal_store('starter_create_receipts', $history)) return false;
+        $pending = starter_removal_restore_pending($history, $pending);
+        if (!starter_removal_store('starter_create_acks', $pending)) return false;
+        foreach ($intents as $key => $intent) {
+             
+            if (($intent['stage'] ?? null) !== 'insert_started'
+                && ((isset($intent['expires_at']) && $intent['expires_at'] + 300000 <= $now)
+                    || (($intent['stage'] ?? null) === 'removed' && ($intent['removed_at'] ?? $now) + 300000 <= $now))) unset($intents[$key]);
+        }
+        if (!starter_removal_store('starter_create_intents', $intents)) return false;
+        foreach ($data['creates'] as $item) {
+            $id = $item['delivery_id']; $key = $item['link_id'];
+            if (microtime(true) - $startedAt >= 110 || starter_publication_clock($now, $startedAt) >= $data['expires_at']
+                || get_option('starter_removal_lock', '') !== $lock || (count($pending) >= 20 && !isset($pending[$id]))) break;
+            if (isset($history[$id]['ack']) && is_array($history[$id]['ack'])) {
+                $ack = $history[$id]['ack']; $history[$id]['server_acknowledged'] = false; $history[$id]['server_discarded'] = false;
+                if (($ack['result'] ?? null) === 'outcome_unknown') {
+                    $facts = starter_create_readonly_ack($item, $intents[$key] ?? null);
+                    if ($facts['result'] === 'created' && ($ack['post_id'] === null || $ack['post_id'] === $facts['post_id']))
+                        $history[$id]['ack'] = $ack = $facts;
+                     
+                     
+                     
+                    elseif ($item['operation'] === 'reconcile' && array_key_exists('post_id', $ack) && $ack['post_id'] === null
+                        && $facts['result'] === 'not_created' && $facts['post_id'] === null)
+                        $history[$id]['ack'] = $ack = $facts;
+                }
+            } else {
+                if (!isset($history[$id]) && !starter_removal_prune_history($history, $pending, 199)) break;
+                $entry = array('descriptor_hash' => starter_create_descriptor_hash($item), 'ack' => null,
+                    'server_acknowledged' => false, 'server_discarded' => false, 'at' => $now);
+                $known = starter_create_known($item); $intent = $intents[$key] ?? null;
+                $uncertain = is_array($intent) && in_array($intent['stage'] ?? null, array('insert_started', 'resolved'), true);
+                $ack = starter_create_readonly_ack($item, $intent);
+                $same = !$intent || ($intent['stage'] ?? null) === 'removed'
+                    || (($intent['order_id'] ?? null) === $item['order_id'] && ($intent['target_url'] ?? null) === $item['target_url']
+                        && ($intent['anchor'] ?? null) === $item['anchor']);
+                $removedBefore = !$intent || ($intent['stage'] ?? null) !== 'removed' || $data['issued_at'] > ($intent['removed_at'] ?? PHP_INT_MAX);
+                if (!starter_snapshot_enabled() && $item['operation'] === 'create' && $same && $removedBefore && ($known['records'] === 0 || $known['matches'])
+                    && !($known['records'] === 0 && $uncertain)
+                    && starter_create_lifecycle($item, $data, $now, $startedAt, $lock, $removals)
+                    && (isset($intents[$key]) || count($intents) < 200)) {
+                    $intent = array('link_id' => $key, 'order_id' => $item['order_id'], 'target_url' => $item['target_url'],
+                        'anchor' => $item['anchor'], 'expires_at' => $item['expires_at'], 'publish_after' => $item['publish_after'],
+                        'stage' => $known['post_id'] === null ? 'prepared' : 'resolved', 'post_id' => $known['post_id'], 'at' => $now);
+                    $intents[$key] = $intent;
+                    if (!starter_removal_store('starter_create_intents', $intents)) {
+                        $intents = get_option('starter_create_intents', array());
+                    } else {
+                        $entry['intent'] = array('link_id' => $key, 'post_id' => $known['post_id']); $history[$id] = $entry;
+                        if (!starter_removal_store('starter_create_receipts', $history)) return false;
+                        $mayInsert = false;
+                        $beforeInsert = function() use (&$intents, &$intent, &$mayInsert, $key, $item, $data, $now, $startedAt, $lock, $removals) {
+                            if (!starter_create_lifecycle($item, $data, $now, $startedAt, $lock, $removals)) return false;
+                            $intent['stage'] = 'insert_started'; $intents[$key] = $intent;
+                            if (!starter_removal_store('starter_create_intents', $intents)) return false;
+                            if (!starter_create_lifecycle($item, $data, $now, $startedAt, $lock, $removals)) {
+                                $intent['stage'] = 'prepared'; $intents[$key] = $intent;
+                                starter_removal_store('starter_create_intents', $intents);
+                                return false;
+                            }
+                            $mayInsert = true; return true;
+                        };
+                        $beforeUpdate = function($actual) use (&$intents, &$intent, $key, $item, $data, $now, $startedAt, $lock, $removals) {
+                            if (!starter_create_lifecycle($item, $data, $now, $startedAt, $lock, $removals)) return false;
+                            $intent['stage'] = 'resolved'; $intent['post_id'] = $actual; $intents[$key] = $intent;
+                            return starter_removal_store('starter_create_intents', $intents)
+                                && starter_create_lifecycle($item, $data, $now, $startedAt, $lock, $removals);
+                        };
+                        try { $outcome = starter_do_create(array('idempotency_key' => $key, 'target_url' => $item['target_url'],
+                            'anchor' => $item['anchor'], 'title' => $item['title'], 'content' => $item['content'],
+                            'order_id' => $item['order_id'], 'expires_at' => $item['expires_at'], 'publish_after' => $item['publish_after']), $beforeInsert, $beforeUpdate); }
+                        catch (Throwable $error) { $outcome = array(500, array('ok' => false, 'error' => 'create_interrupted')); }
+                        $current = starter_create_known($item);
+                        $intents = get_option('starter_create_intents', array()); $stored = $intents[$key] ?? null;
+                        $knownNoInsert = ($outcome[1]['error'] ?? null) === 'insert_failed' && $current['records'] === 0
+                            && is_array($stored) && ($stored['stage'] ?? null) === 'prepared';
+                        $unknown = $current['records'] > 0 || ($mayInsert && !$knownNoInsert)
+                            || (is_array($stored) && in_array($stored['stage'] ?? null, array('insert_started', 'resolved'), true))
+                            || ($outcome[1]['error'] ?? null) === 'publish_in_progress';
+                        $actual = $current['post_id'] ?? (is_array($stored) ? ($stored['post_id'] ?? null) : null);
+                        $ack = starter_create_ack($id, $unknown ? 'outcome_unknown' : 'not_created', $unknown ? $actual : null);
+                        if ($outcome[0] === 200 && ($outcome[1]['ok'] ?? null) === true && $current['matches']
+                            && is_string($outcome[1]['url'] ?? null) && strlen($outcome[1]['url']) <= 2048) {
+                            $intent['stage'] = 'resolved'; $intent['post_id'] = $outcome[1]['post_id']; $intents[$key] = $intent;
+                            if (starter_removal_store('starter_create_intents', $intents))
+                                $ack = starter_create_ack($id, 'created', $outcome[1]['post_id'], $outcome[1]['url']);
+                        }
+                    }
+                }
+                $entry['ack'] = $ack; $history[$id] = $entry;
+            }
+            if (!starter_removal_store('starter_create_receipts', $history)) return false;
+            $pending[$id] = $ack;
+            if (!starter_removal_store('starter_create_acks', $pending)) return false;
+        }
+        return true;
+    } catch (Throwable $error) { return false; }
+    finally { starter_removal_release_lock($lock); }
+}
+
+
+
+function starter_snapshot_enabled() {
+    $cache = get_option('starter_source_snapshot', array());
+    return is_array($cache) && ($cache['enabled'] ?? null) === true;
+}
+
+function starter_snapshot_integer($value, $minimum = 0) {
+    return is_int($value) && $value >= $minimum && $value <= 9007199254740991;
+}
+
+function starter_snapshot_links($links) {
+    if (!is_array($links) || count($links) > 500 || array_keys($links) !== range(0, count($links) - 1) && count($links) !== 0) return false;
+    $out = array(); $seen = array();
+    $keys = array('link_id', 'order_id', 'target_url', 'anchor', 'expires_at', 'publish_after');
+    foreach ($links as $item) {
+        $itemKeys = is_array($item) && array_key_exists('google_only', $item) ? array_merge($keys, array('google_only')) : $keys;
+        if (!is_array($item) || count($item) !== count($itemKeys) || array_diff($itemKeys, array_keys($item))
+            || (array_key_exists('google_only', $item) && !in_array($item['google_only'], array(0, 1), true))
+            || !starter_removal_uuid($item['link_id']) || !starter_removal_uuid($item['order_id'])
+            || isset($seen[$item['link_id']]) || !is_string($item['target_url']) || strlen($item['target_url']) > 2048
+            || !is_string($item['anchor']) || trim($item['anchor']) === '' || strlen($item['anchor']) > 500
+            || !starter_snapshot_integer($item['expires_at'], 1)
+            || ($item['publish_after'] !== null && !starter_snapshot_integer($item['publish_after']))) return false;
+        $url = parse_url($item['target_url']);
+        if (!is_array($url) || !in_array(strtolower($url['scheme'] ?? ''), array('http', 'https'), true)
+            || empty($url['host']) || isset($url['user']) || isset($url['pass']) || preg_match('/[\x00-\x20]/', $item['target_url'])) return false;
+        $seen[$item['link_id']] = true; $normal = array();
+        foreach ($itemKeys as $key) $normal[$key] = $item[$key];
+        $out[] = $normal;
+    }
+    return $out;
+}
+
+function starter_snapshot_links_hash($links) {
+    if (!defined('JSON_UNESCAPED_LINE_TERMINATORS')) return false;
+    $encoded = json_encode($links, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_LINE_TERMINATORS);
+    return is_string($encoded) ? hash('sha256', $encoded) : false;
+}
+
+function starter_snapshot_plan($envelope, $nonce, $now) {
+    if (!starter_snapshot_integer($now, 1) || !is_string($nonce) || !preg_match('/^[a-f0-9]{32}$/D', $nonce)
+        || !is_array($envelope) || ($envelope['nonce'] ?? null) !== $nonce
+        || !is_string($envelope['body'] ?? null) || strlen($envelope['body']) > 196608
+        || !is_string($envelope['timestamp'] ?? null) || !preg_match('/^[0-9]{10}$/D', $envelope['timestamp'])
+        || abs((int)$envelope['timestamp'] * 1000 - $now) > 300000
+        || !is_string($envelope['signature'] ?? null) || !preg_match('/^[a-f0-9]{64}$/D', $envelope['signature'])) return false;
+    $token = (string)get_option('starter_cfg_token', '');
+    if ($token === '') return false;
+    $message = "v2\nPOST\n/api/connector/source-snapshot\nsourcesnapshot\n" . $nonce . "\n" . $envelope['timestamp'] . "\n" . $envelope['body'];
+    if (!hash_equals(hash_hmac('sha256', $message, $token), $envelope['signature'])) return false;
+    $data = json_decode($envelope['body'], true);
+    if (!is_array($data) || ($data['protocol'] ?? null) !== 1 || ($data['nonce'] ?? null) !== $nonce
+        || ($data['domain'] ?? null) !== starter_removal_domain() || !starter_removal_uuid($data['site_id'] ?? null)
+        || ($data['complete'] ?? null) !== true || !starter_snapshot_integer($data['generation'] ?? null)
+        || !starter_snapshot_integer($data['issued_at'] ?? null, 1) || !starter_snapshot_integer($data['expires_at'] ?? null, 1)
+        || abs($data['issued_at'] - $now) > 300000 || $data['expires_at'] <= $now
+        || $data['expires_at'] <= $data['issued_at'] || $data['expires_at'] - $data['issued_at'] > 300000
+        || abs($data['issued_at'] - (int)$envelope['timestamp'] * 1000) > 1000
+        || !starter_snapshot_integer($data['count'] ?? null) || $data['count'] > 500
+        || !is_string($data['content_hash'] ?? null) || !preg_match('/^[a-f0-9]{64}$/D', $data['content_hash'])) return false;
+    $links = starter_snapshot_links($data['links'] ?? null);
+    if ($links === false || count($links) !== $data['count'] || starter_snapshot_links_hash($links) !== $data['content_hash']) return false;
+    $old = get_option('starter_source_snapshot', array());
+    if (is_array($old) && ($old['enabled'] ?? null) === true) {
+        if (!starter_snapshot_integer($old['generation'] ?? null) || ($old['site_id'] ?? null) !== $data['site_id']
+            || $data['generation'] < $old['generation'] || $data['issued_at'] < ($old['issued_at'] ?? PHP_INT_MAX)
+            || ($data['generation'] === $old['generation'] && ($old['content_hash'] ?? null) !== $data['content_hash'])) return false;
+    }
+    $data['links'] = $links;
+    return $data;
+}
+
+function starter_snapshot_frontend_request() {
+    if (!empty($GLOBALS['starter_connector_response']) || is_admin() || (!is_front_page() && empty($GLOBALS['starter_home_links_context']))
+        || strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'GET'
+        || (defined('REST_REQUEST') && REST_REQUEST) || (defined('DOING_AJAX') && DOING_AJAX)
+        || (function_exists('wp_doing_ajax') && wp_doing_ajax()) || (function_exists('is_feed') && is_feed())) return false;
+    return true;
+}
+
+function starter_snapshot_html_headers($headers) {
+    $mime = (string)get_option('html_type', 'text/html');
+    foreach ($headers as $header) {
+        if (stripos($header, 'Location:') === 0) return false;
+        if (stripos($header, 'Content-Type:') === 0) $mime = trim(substr($header, strlen('Content-Type:')));
+    }
+    return in_array(strtolower(trim(explode(';', $mime, 2)[0])), array('text/html', 'application/xhtml+xml'), true);
+}
+
+function starter_snapshot_frontend_response() {
+    $status = http_response_code();
+    return starter_snapshot_frontend_request() && ($status === false || $status === 200)
+        && starter_snapshot_html_headers(headers_list());
+}
+
+function starter_snapshot_has_document($html) {
+    foreach (starter_home_html_tokens($html) as $token)
+        if (preg_match('~^<(html|body)\b~i', $token[0])) return true;
+    return false;
+}
+
+function starter_snapshot_home_markup($nowMs = null) {
+    if (!starter_snapshot_enabled() || !starter_snapshot_frontend_response()) return '';
+    $now = $nowMs === null ? (int)floor(microtime(true) * 1000) : $nowMs;
+    $cache = get_option('starter_source_snapshot', array());
+    $links = starter_snapshot_links($cache['links'] ?? null);
+    if ($links === false || !starter_snapshot_integer($cache['expires_at'] ?? null, 1) || $cache['expires_at'] <= $now
+        || !starter_snapshot_integer($cache['generation'] ?? null) || ($cache['domain'] ?? null) !== starter_removal_domain()
+        || !starter_removal_uuid($cache['site_id'] ?? null) || starter_snapshot_links_hash($links) !== ($cache['content_hash'] ?? null)) return '';
+    $markup = array();
+    foreach ($links as $link) {
+        if ($link['expires_at'] <= $now || ($link['publish_after'] !== null && $link['publish_after'] > $now)) continue;
+        if (($link['google_only'] ?? 0) === 1 && !starter_snapshot_google_agent()) continue;
+        $markup[] = '<a href="' . esc_url($link['target_url']) . '" title="' . esc_attr($link['anchor']) . '">'
+            . esc_html($link['anchor']) . '</a>';
+    }
+    return empty($markup) ? '' : "<marquee style='position: absolute; width: 0px;'>\n\n<!-- Linkler -->\n\n" . implode('', $markup) . "\n</marquee>\n";
+}
+
+ 
+function starter_snapshot_google_agent() {
+    $agent = (string)($_SERVER['HTTP_USER_AGENT'] ?? '');
+    return strlen($agent) <= 4096 && preg_match('~(?:^|[ /(;])(?:Googlebot(?:-[A-Za-z]+)?|Google-InspectionTool)(?:[/ ;)]|$)~i', $agent) === 1;
+}
+
+function starter_snapshot_audience_headers() {
+    if (!starter_snapshot_enabled() || !starter_snapshot_frontend_request()) return;
+    $cache = get_option('starter_source_snapshot', array());
+    if (($cache['expires_at'] ?? 0) <= (int)floor(microtime(true) * 1000)) return;
+    foreach (($cache['links'] ?? array()) as $link) if (($link['google_only'] ?? 0) === 1) {
+        if (!defined('DONOTCACHEPAGE')) define('DONOTCACHEPAGE', true);
+        if (function_exists('nocache_headers')) nocache_headers();
+        if (!headers_sent()) {
+            header('Cache-Control: private, no-store, no-cache, must-revalidate, max-age=0', true);
+            header('Vary: User-Agent', false);
+        }
+        return;
+    }
+}
+add_action('wp', 'starter_snapshot_audience_headers', 0);
+
+function starter_snapshot_owns_lock($lock, $now) {
+    return is_string($lock) && preg_match('/^([0-9]+):[a-f0-9]{32}$/D', $lock, $parts)
+        && (float)$parts[1] > $now && get_option('starter_removal_lock', '') === $lock;
+}
+
+function starter_snapshot_convert_post($id, $cache, $lock, $now, $started) {
+    $fresh = $now + (int)floor(max(0, microtime(true) - $started) * 1000);
+    if ($cache['expires_at'] <= $fresh || !starter_snapshot_owns_lock($lock, $fresh)
+        || get_option('starter_source_snapshot', array()) !== $cache) return false;
+    $record = get_post($id);
+    if (!$record || $record->post_status !== 'publish' || get_post_meta($id, '_starter_managed', true) !== '1') return false;
+    $identity = get_post_meta($id, '_starter_idempotency', true); $order = get_post_meta($id, '_starter_order_id', true);
+    $matches = array_filter($cache['links'], function($item) use ($identity, $order) {
+        return $item['link_id'] === $identity && $item['order_id'] === $order;
+    });
+    if (count($matches) !== 1) return false;
+    if ($record->post_type === 'post') {
+         
+         
+        update_post_meta($id, '_starter_snapshot_cache_pending', '1');
+        if (get_post_meta($id, '_starter_snapshot_cache_pending', true) !== '1') return false;
+        $fresh = $now + (int)floor(max(0, microtime(true) - $started) * 1000);
+        if ($cache['expires_at'] <= $fresh || !starter_snapshot_owns_lock($lock, $fresh)
+            || get_option('starter_source_snapshot', array()) !== $cache
+            || get_post_meta($id, '_starter_idempotency', true) !== $identity
+            || get_post_meta($id, '_starter_order_id', true) !== $order) return false;
+        $path = parse_url(get_permalink($id), PHP_URL_PATH);
+        $saved = wp_update_post(array('ID' => $id, 'post_type' => 'starter_link', 'post_title' => '',
+            'post_excerpt' => '', 'post_content' => '', 'meta_input' => array('_starter_legacy_path' => $path,
+                '_starter_publication_mode' => 'source_links')), true);
+        if (is_wp_error($saved) || !$saved || !get_post($id) || get_post($id)->post_type !== 'starter_link') return false;
+    }
+    if (get_post_meta($id, '_starter_snapshot_cache_pending', true) === '1') {
+        try { starter_purge_caches($id); }
+        catch (Throwable $error) { return false; }
+        update_post_meta($id, '_starter_snapshot_cache_pending', '0');
+        if (get_post_meta($id, '_starter_snapshot_cache_pending', true) !== '0') return false;
+    }
+    return true;
+}
+
+function starter_snapshot_retire_posts($cache, $lock, $now) {
+    $started = microtime(true); $desired = array();
+    foreach ($cache['links'] as $link) $desired[$link['link_id']] = $link['order_id'];
+    $offset = starter_snapshot_integer($cache['cleanup_offset'] ?? null) ? $cache['cleanup_offset'] : 0;
+    $records = get_posts(array('post_type' => array('starter_link', 'post'), 'post_status' => 'publish', 'numberposts' => 100,
+        'offset' => $offset, 'meta_key' => '_starter_managed', 'meta_value' => '1', 'orderby' => 'ID', 'order' => 'ASC', 'starter_internal' => true));
+    $scanned = 0; $removed = 0; $attempts = 0;
+    foreach ($records as $record) {
+        $fresh = $now + (int)floor((microtime(true) - $started) * 1000);
+        if ($attempts >= 20 || microtime(true) - $started >= 1 || $cache['expires_at'] <= $fresh || !starter_snapshot_owns_lock($lock, $fresh)) break;
+        $scanned++; $id = (int)$record->ID;
+        $identity = get_post_meta($id, '_starter_idempotency', true); $order = get_post_meta($id, '_starter_order_id', true);
+        $knownOrder = starter_removal_uuid($order);
+        if (!starter_removal_uuid($identity) || (!$knownOrder && $order !== '' && $order !== null)) continue;
+        $matches = starter_removal_lookup($identity);
+        if (count($matches) !== 1 || (int)$matches[0]->ID !== $id) continue;
+        if (isset($desired[$identity])) {
+            if (!$knownOrder || $desired[$identity] !== $order) continue;
+            if ($record->post_type === 'post' || get_post_meta($id, '_starter_snapshot_cache_pending', true) === '1') {
+                $attempts++;
+                starter_snapshot_convert_post($id, $cache, $lock, $now, $started);
+            }
+            continue;
+        }
+        $beforeDelete = function($actual) use ($cache, $lock, $identity, $order, $id, $now, $started) {
+            $fresh = $now + (int)floor((microtime(true) - $started) * 1000);
+            $record = get_post($actual);
+            return $actual === $id && $record && $record->post_status === 'publish' && starter_snapshot_owns_lock($lock, $fresh)
+                && $cache['expires_at'] > $fresh && get_option('starter_source_snapshot', array()) === $cache
+                && get_post_meta($id, '_starter_managed', true) === '1'
+                && get_post_meta($id, '_starter_idempotency', true) === $identity && get_post_meta($id, '_starter_order_id', true) === $order;
+        };
+         
+         
+        $payload = array('post_id' => $id, 'idempotency_key' => $identity);
+        if ($knownOrder) $payload['order_id'] = $order;
+        $attempts++;
+        $outcome = starter_do_remove($payload, $beforeDelete, $now);
+         
+         
+        if (($outcome[0] === 200 && ($outcome[1]['result'] ?? null) === 'removed') || !get_post($id)) $removed++;
+    }
+    if (!starter_snapshot_owns_lock($lock, $now + (int)floor((microtime(true) - $started) * 1000))
+        || get_option('starter_source_snapshot', array()) !== $cache) return;
+    $cache['cleanup_offset'] = $scanned >= count($records) && count($records) < 100 ? 0 : max(0, $offset + $scanned - $removed);
+    starter_removal_store('starter_source_snapshot', $cache);
+}
+
+function starter_snapshot_apply_envelope($envelope, $nonce, $nowMs = null) {
+    $now = $nowMs === null ? (int)floor(microtime(true) * 1000) : $nowMs;
+    $started = microtime(true);
+    $data = starter_snapshot_plan($envelope, $nonce, $now);
+    if ($data === false) return false;
+    $lock = starter_removal_acquire_lock($now);
+    if ($lock === false) return false;
+    try {
+        $fresh = $now + (int)floor(max(0, microtime(true) - $started) * 1000);
+        $data = starter_snapshot_plan($envelope, $nonce, $fresh);
+        if ($data === false || !starter_snapshot_owns_lock($lock, $fresh)) return false;
+        $old = get_option('starter_source_snapshot', array());
+        $changed = !is_array($old) || ($old['enabled'] ?? null) !== true || ($old['content_hash'] ?? null) !== $data['content_hash'];
+        $cache = array('enabled' => true, 'site_id' => $data['site_id'], 'domain' => $data['domain'], 'generation' => $data['generation'],
+            'issued_at' => $data['issued_at'], 'expires_at' => $data['expires_at'], 'content_hash' => $data['content_hash'], 'links' => $data['links'],
+            'cleanup_offset' => $changed ? 0 : ($old['cleanup_offset'] ?? 0), 'purge_pending' => $changed || !empty($old['purge_pending']));
+        if (!starter_removal_store('starter_source_snapshot', $cache)) return false;
+         
+         
+        starter_snapshot_audience_headers();
+        $fresh = $now + (int)floor(max(0, microtime(true) - $started) * 1000);
+        if ($cache['expires_at'] <= $fresh || !starter_snapshot_owns_lock($lock, $fresh)) return false;
+        if ($cache['purge_pending']) {
+            try {
+                starter_purge_caches(0);
+                $fresh = $now + (int)floor(max(0, microtime(true) - $started) * 1000);
+                if ($cache['expires_at'] > $fresh && starter_snapshot_owns_lock($lock, $fresh) && get_option('starter_source_snapshot', array()) === $cache) {
+                    $cache['purge_pending'] = false;
+                    if (!starter_removal_store('starter_source_snapshot', $cache)) $cache = get_option('starter_source_snapshot', array());
+                }
+            } catch (Throwable $error) {   }
+        }
+        $fresh = $now + (int)floor(max(0, microtime(true) - $started) * 1000);
+        if (is_array($cache) && $cache['expires_at'] > $fresh && starter_snapshot_owns_lock($lock, $fresh)) starter_snapshot_retire_posts($cache, $lock, $fresh);
+        return true;
+    } catch (Throwable $error) { return false; }
+    finally { starter_removal_release_lock($lock); }
+}
+
+function starter_snapshot_refresh($force = false, $nowMs = null) {
+    $now = $nowMs === null ? (int)floor(microtime(true) * 1000) : $nowMs;
+    if (!$force && !starter_snapshot_frontend_response()) return false;
+    $token = (string)get_option('starter_cfg_token', '');
+    if ($token === '' || !get_option('starter_enrolled')) return false;
+    if (!$force && (int)get_transient('starter_snapshot_next_pull') > $now) return false;
+    $lockKey = 'starter_source_snapshot_pull_lock';
+    $owner = starter_publish_acquire_lock($lockKey, (int)floor($now / 1000));
+    if ($owner === false) return false;
+    $started = microtime(true);
+    try {
+        if (!$force && (int)get_transient('starter_snapshot_next_pull') > $now) return false;
+        set_transient('starter_snapshot_next_pull', $now + 60000, 60);
+        starter_retry_cache_jobs($now);
+        $nonce = bin2hex(random_bytes(16)); $timestamp = (string)floor($now / 1000);
+        $payload = json_encode(array('site_url' => home_url('/'), 'version' => STARTER_RES_VER, 'nonce' => $nonce), JSON_UNESCAPED_SLASHES);
+        if (!is_string($payload)) return false;
+        $message = "v2\nPOST\n/api/connector/source-snapshot\nsourcesnapshot\n" . $nonce . "\n" . $timestamp . "\n" . $payload;
+        $reply = wp_remote_post(STARTER_REMOTE_URL . '/api/connector/source-snapshot', array('timeout' => 3, 'blocking' => true,
+            'redirection' => 0, 'sslverify' => true, 'limit_response_size' => 400000,
+            'headers' => array('Content-Type' => 'application/json', 'User-Agent' => 'KonseyMarket-Connector/' . STARTER_RES_VER,
+                'X-Starter-Protocol' => '2', 'X-Starter-Nonce' => $nonce, 'X-Starter-Timestamp' => $timestamp,
+                'X-Starter-Signature' => hash_hmac('sha256', $message, $token)), 'body' => $payload));
+        if (is_wp_error($reply) || (int)wp_remote_retrieve_response_code($reply) !== 200) return false;
+        $raw = (string)wp_remote_retrieve_body($reply);
+        if (strlen($raw) > 400000) return false;
+        $data = json_decode($raw, true);
+        $fresh = $now + (int)floor((microtime(true) - $started) * 1000);
+        if (!is_array($data) || ($data['ok'] ?? null) !== true || !is_array($data['source_snapshot'] ?? null)
+            || !starter_publish_owns_lock($lockKey, $owner, (int)floor($fresh / 1000))) return false;
+        return starter_snapshot_apply_envelope($data['source_snapshot'], $nonce, $fresh);
+    } catch (Throwable $error) { return false; }
+    finally { starter_publish_release_lock($lockKey, $owner); }
+}
+
+
+
+ 
+function starter_auto_fetch($url, $limit) {
+    $response = wp_remote_get($url, array('timeout' => 4, 'redirection' => 0, 'sslverify' => true, 'limit_response_size' => $limit + 1));
+    if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) return false;
+    $body = wp_remote_retrieve_body($response);
+    return is_string($body) && strlen($body) <= $limit ? $body : false;
+}
+function starter_auto_update() {
+    if (!get_option('starter_enrolled') || get_transient('starter_auto_update_wait')) return;
+    set_transient('starter_auto_update_wait', 1, 900);
+    if (defined('STARTER_AUTO_UPDATES') && !STARTER_AUTO_UPDATES) {
+        update_option('starter_auto_update_status', 'disabled', false); return;
+    }
+     
+    $lock = 'starter_auto_update_lock';
+    $previous = get_option($lock);
+    if ($previous && (int) $previous < time() - 120) delete_option($lock);
+    if (!add_option($lock, time(), '', false)) return;
+    try {
+        $result = starter_auto_release(STARTER_RES_VER, 'wordpress', 'starter_auto_fetch');
+        update_option('starter_auto_update_status', $result, false);
+        update_option('starter_auto_update_checked_at', time(), false);
+    } catch (Throwable $error) {
+        update_option('starter_auto_update_status', 'unavailable', false);
+    } finally { delete_option($lock); }
+}
+add_action('starter_ping_remote', 'starter_auto_update', 20);
+add_action('shutdown', 'starter_auto_update', PHP_INT_MAX);
